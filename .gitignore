@@ -1,5 +1,12 @@
 .venv
+.conda
 english/
 **.swc
 *.tar
 **pycache**
+
+**audio/
+*.wav
+*.mp3
+*.flac
+*.ogg
