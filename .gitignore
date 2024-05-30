@@ -3,6 +3,7 @@
 english/
 **.swc
 *.tar
+*.rar
 **pycache**
 
 **audio/
