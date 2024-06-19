@@ -235,10 +235,12 @@ def overlay_noise_clips(clip: PronunciationClip, noise: List[AudioSegment],
         noisy_clip.export(os.path.join(path, fname + '.wav'), format="wav")
         np.save(os.path.join(path, fname + '.npy'), noisy_cgram)
 
-def load_cochleagrams(path: os.PathLike, word2ind: Dict[str, int]
+def load_cochleagrams(path: os.PathLike, word2ind: Dict[str, int],
+                      limit: Optional[int] = None
                       ) -> Tuple[np.ndarray, np.ndarray]:
     data = []
     targets = []
+    i = 0
     for f in os.listdir(path):
         w = f.split('_')[0]
         if not f.endswith(".npy") or w not in word2ind:
@@ -246,4 +248,7 @@ def load_cochleagrams(path: os.PathLike, word2ind: Dict[str, int]
         x = np.load(os.path.join(path, f))
         data.append(x)
         targets.append(word2ind[w])
+        i += 1
+        if limit is not None and i >= limit:
+            break
     return np.array(data, dtype=np.float32), np.array(targets, dtype=np.int64)
