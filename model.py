@@ -48,7 +48,8 @@ def create_model(n_classes: int = 512, device: torch.device = 'cpu'
         nn.Linear(8*8*512, 4096),
         nn.Dropout(0.5),
         nn.Linear(4096, n_classes),
-        nn.Softmax(dim=-1)).to(device)
+        # nn.Softmax(dim=-1)
+        ).to(device)
 
 def cv_sets(X: torch.Tensor, y: torch.Tensor, k: int = 10,
             random_seed: Optional[int] = None
@@ -199,9 +200,11 @@ def train(model: nn.Module, epochs: int, X_train: torch.Tensor,
         t_losses.append(t_loss)
         v_losses.append(v_loss)
         secs_elapsed = (datetime.now() - starttime).total_seconds()
-        print(f'\tTraining took: {secs_elapsed:0.2f}s\twith loss: {t_loss:0.6f}')
+        print(f'\tTraining took: {secs_elapsed:0.2f}s')
+        print(f'\t\twith train loss: {t_loss:0.6f}')
+        print(f'\t\twith valid loss: {v_loss:0.6f}')
         if save_ckpt:
-            checkpoint_model(os.path.join(ckpt_dir, f'model-ckpt-e{e+1}.pt'),
+            checkpoint_model(os.path.join(ckpt_dir, f'model-ckpt-e{e+1:03}.pt'),
                              model, e, optim, t_loss, v_loss)
     return t_losses, v_losses
 
