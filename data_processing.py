@@ -224,16 +224,17 @@ def overlay_noise_clips(clip: PronunciationClip, noise: List[AudioSegment],
                         SNRs: List[float], paths: List[os.PathLike],
                         i: Optional[int], starttime: Optional[float]) -> None:
     a = gen_clip(clip.audio)
-    if (i + 1) % 200 == 0:
+    if starttime is not None and (i + 1) % 200 == 0:
         print(f'Parsing {i+1}-th file, {time.time() - starttime}s since start.')
-    for n, snr, path in zip(noise, SNRs, paths):
-        noisy_clip = overlay_noise(snr, a, n)
-        noisy_cgram = aa_cgram(audio_to_cgram(noisy_clip))
+    for n, path in zip(noise, paths):
+        for snr in SNRs:
+            noisy_clip = overlay_noise(snr, a, n)
+            noisy_cgram = aa_cgram(audio_to_cgram(noisy_clip))
 
-        fname = f'{clip.word}_{i}' if i is not None else clip.word
+            fname = f'{clip.word}_{snr:.2f}dBSNR_{i}' if i is not None else clip.word
 
-        noisy_clip.export(os.path.join(path, fname + '.wav'), format="wav")
-        np.save(os.path.join(path, fname + '.npy'), noisy_cgram)
+            noisy_clip.export(os.path.join(path, fname + '.wav'), format="wav")
+            np.save(os.path.join(path, fname + '.npy'), noisy_cgram)
 
 def load_cochleagrams(path: os.PathLike, word2ind: Dict[str, int],
                       limit: Optional[int] = None

@@ -221,3 +221,13 @@ def eval_acc(model: nn.Module, X_test: torch.Tensor, y_test: torch.Tensor,
             ks = torch.topk(o, 1).indices.reshape(-1)
             running_score += np.sum((ks == t).numpy(force=True))
     return running_score / N
+
+def load_dataset(path: os.PathLike) -> Tuple[torch.Tensor, torch.Tensor]:
+    X = np.load(os.path.join(path, 'inputs.npy'))
+    T = np.load(os.path.join(path, 'targets.npy'))
+
+    N = X.shape[0]
+    X = X.reshape((N, 1, 256, 256)) # reshape to 1-channel for convolutions
+
+    return torch.tensor(X, dtype=torch.float32), \
+        torch.tensor(T, dtype=torch.long)
