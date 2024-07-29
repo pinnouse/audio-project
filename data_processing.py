@@ -1,9 +1,12 @@
 import array
+import concurrent.futures
+import math
 import os
+import random
+import re
 import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
-import concurrent.futures
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -142,7 +145,7 @@ def make_noise_playlist(path: os.PathLike, limit: int = 0) -> List[AudioSegment]
 N_FILTERS = 50
 LO_LIM = 30
 HI_LIM = 7860
-SAMPLE_RATE = 16000
+SAMPLE_RATE = 16_000
 
 def gen_clip(audio: AudioSegment, duration: int = 2000) -> AudioSegment:
     clip = AudioSegment.silent(duration=duration, frame_rate=SAMPLE_RATE)
@@ -151,10 +154,10 @@ def gen_clip(audio: AudioSegment, duration: int = 2000) -> AudioSegment:
     return clip.overlay(audio, offset)
 
 def audio_to_cgram(audio: AudioSegment) -> np.array:
-    # TODO: find audio input type for cochleagram (8-bit integer PCM?)
     arr = np.array(audio.get_array_of_samples())
     return cgram.human_cochleagram(arr, audio.frame_rate or SAMPLE_RATE,
-                                   N_FILTERS, LO_LIM, HI_LIM, 4, downsample=200)
+                                   N_FILTERS, LO_LIM, HI_LIM, 4, downsample=200
+                                   ).astype(np.float32)
 
 def aa_cgram(cochleagram: np.ndarray, size: int = 256) -> np.ndarray:
     f, t = cochleagram.shape
@@ -184,30 +187,52 @@ def vocab_word2ind(vocab: List[str]) -> Dict[str, int]:
     return x
 
 def filter_clips_vocab(clips: List[PronunciationClip], vocab: List[str]
-                 ) -> List[PronunciationClip]:
+                       ) -> List[PronunciationClip]:
     return list(filter(lambda c: c.word in vocab, clips))
 
-def load_clips(path: str = 'parsed_files/raw_clips') -> List[PronunciationClip]:
+def load_clips(path: str = 'parsed_files/raw_clips', vocab: List[str] = []
+               ) -> List[PronunciationClip]:
+    """Loads all `.wav` file clips and parses them into PronunciationClip's.
+
+    Args:
+    ----
+    path: The destination where the raw `wav` files are stored.
+    vocab: The vocabulary file storing all words to load. Clips not found in the
+        vocabulary will be ignored.
+
+    Returns:
+    -------
+    A list of clips containing the audio and words for every clip
+
+    """
     clips = []
     for fp in os.listdir(path):
         if not fp.endswith('.wav'):
             continue
         filename = os.path.join(path, fp)
-        audio = AudioSegment.from_file(filename)
-        word = fp.split('_')[0]
-        clips.append(PronunciationClip(word, audio))
+        try:
+            word = fp.split('_')[0]
+            if len(vocab) > 0 and word not in vocab:
+                continue
+            audio = AudioSegment.from_file(filename).set_channels(1) \
+                .set_frame_rate(SAMPLE_RATE).set_sample_width(4)
+            clips.append(PronunciationClip(word, audio))
+        except Exception as e:
+            print(f'Failed to parse file {filename}: {e}')
     return clips
 
 def overlay_noise(snr: float, signal: AudioSegment, noise: AudioSegment
                   ) -> AudioSegment:
-    noise = noise.set_channels(1).set_frame_rate(SAMPLE_RATE).set_sample_width(4)
-    signal = signal.set_frame_rate(SAMPLE_RATE)
+    noise = noise.set_channels(1).set_frame_rate(SAMPLE_RATE) \
+        .set_sample_width(4)
+    signal = signal.set_frame_rate(SAMPLE_RATE).set_sample_width(4).normalize()
     signal_rms = signal.rms
     noise_rms = noise.rms
     scaling_factor = (signal_rms / noise_rms) * (10**(-snr/20))
     noise_np = np.array(noise.get_array_of_samples())
-    noise_samples = noise_np * scaling_factor
-    noise_array = array.array(signal.array_type, np.round(noise_samples).astype(np.int32))
+    noise_samples = np.clip(noise_np * scaling_factor, -(2 ** 32), 2 ** 31 - 1)
+    noise_array = array.array(signal.array_type,
+                              np.round(noise_samples).astype(np.int32))
     scaled_noise = noise._spawn(noise_array)
     return signal.overlay(scaled_noise, loop=True)
 
@@ -220,21 +245,48 @@ def filter_clips(clips: List[PronunciationClip], min_freq: int = 20,
                                  freq_dict.keys()))
     return list(filter(lambda c: c.word in included_words, clips))
 
-def overlay_noise_clips(clip: PronunciationClip, noise: List[AudioSegment],
+def overlay_noise_clip(clip: PronunciationClip, noise: List[AudioSegment],
                         SNRs: List[float], paths: List[os.PathLike],
-                        i: Optional[int], starttime: Optional[float]) -> None:
+                        i: Optional[int], starttime: Optional[float],
+                        save_wav: bool = False) -> None:
     a = gen_clip(clip.audio)
     if starttime is not None and (i + 1) % 200 == 0:
         print(f'Parsing {i+1}-th file, {time.time() - starttime}s since start.')
-    for n, path in zip(noise, paths):
-        for snr in SNRs:
+    for n, snr, path in zip(noise, SNRs, paths):
+        noisy_clip = overlay_noise(snr, a, n)
+        noisy_cgram = aa_cgram(audio_to_cgram(noisy_clip))
+
+        fname = f'{clip.word}_{snr:.2f}dBSNR_{i}' if i is not None \
+            else clip.word
+
+        if save_wav:
+            noisy_clip.export(os.path.join(path, fname + '.wav'),
+                              format="wav")
+        np.save(os.path.join(path, fname + '.npy'), noisy_cgram)
+
+def overlay_noise_clips(clips: List[PronunciationClip],
+                        word2ind: Dict[str, int], noise: List[AudioSegment],
+                        SNRmus: List[float], paths: List[os.PathLike], i: int
+                        ) -> None:
+    starttime = time.time()
+    noise_clips = [[] for _ in noise]
+    noise_targets = []
+    SNRs = [np.random.normal(mu, 2, len(clips)) for mu in SNRmus]
+    for j, clip in enumerate(clips):
+        if starttime is not None and (j + 1) % 100 == 0:
+            print(f'Parsing {j+1}-th file, {time.time() - starttime}s since start.')
+        a = gen_clip(clip.audio)
+        for k, n in enumerate(noise):
+            snr = SNRs[k]
             noisy_clip = overlay_noise(snr, a, n)
             noisy_cgram = aa_cgram(audio_to_cgram(noisy_clip))
-
-            fname = f'{clip.word}_{snr:.2f}dBSNR_{i}' if i is not None else clip.word
-
-            noisy_clip.export(os.path.join(path, fname + '.wav'), format="wav")
-            np.save(os.path.join(path, fname + '.npy'), noisy_cgram)
+            noise_clips[k].append(noisy_cgram)
+        noise_targets.append(word2ind[clip.word])
+    noise_clips = np.array(noise_clips)
+    noise_targets = np.array(noise_targets)
+    for j, path in enumerate(paths):
+        np.save(os.path.join(path, f'inputs_{i}.npy'), noise_clips[j])
+        np.save(os.path.join(path, f'targets_{i}.npy'), noise_targets)
 
 def load_cochleagrams(path: os.PathLike, word2ind: Dict[str, int],
                       limit: Optional[int] = None
@@ -242,14 +294,47 @@ def load_cochleagrams(path: os.PathLike, word2ind: Dict[str, int],
     data = []
     targets = []
     i = 0
-    for f in os.listdir(path):
+    files = list(filter(lambda f: f.endswith(".npy") and \
+                        f.split('_')[0] in word2ind,
+                        os.listdir(path)))
+    random.shuffle(files)
+    for f in files:
         w = f.split('_')[0]
-        if not f.endswith(".npy") or w not in word2ind:
+        try:
+            x = np.load(os.path.join(path, f))
+            data.append(x)
+            targets.append(word2ind[w])
+            i += 1
+        except Exception as e:
+            print(f'Failed for file {f} ({e})')
+        if limit is not None and i >= limit:
+            break
+    return np.array(data, dtype=np.float32), np.array(targets, dtype=np.int64)
+
+def load_cochleagrams_with_snr(path: os.PathLike, word2ind: Dict[str, int],
+                               snr: float, limit: Optional[int]
+                               ) -> Tuple[np.ndarray, np.ndarray]:
+    data = []
+    targets = []
+    N = math.ceil(limit / len(word2ind))
+    word2freq = { w: 0 for w in word2ind.keys() }
+    i = 0
+    files = os.listdir(path)
+    random.shuffle(files)
+    for f in files:
+        w = f.split('_')[0]
+        matched_snr = re.search(r"_([-]?\d+\.\d+)dBSNR", f)
+        if matched_snr is None:
+            continue
+        matched_snr = float(matched_snr[1])
+        if not f.endswith(".npy") or w not in word2ind \
+            or word2freq[w] >= N or abs(matched_snr - snr) > 0.1:
             continue
         x = np.load(os.path.join(path, f))
         data.append(x)
         targets.append(word2ind[w])
+        word2freq[w] += 1
         i += 1
-        if limit is not None and i >= limit:
+        if i >= limit:
             break
     return np.array(data, dtype=np.float32), np.array(targets, dtype=np.int64)
