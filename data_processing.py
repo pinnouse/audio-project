@@ -1,9 +1,12 @@
 import array
+import concurrent.futures
+import math
 import os
+import random
+import re
 import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
-import concurrent.futures
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -11,7 +14,7 @@ import numpy as np
 # https://github.com/mcdermottLab/pycochleagram
 import pycochleagram.cochleagram as cgram
 from pydub import AudioSegment
-from scipy import ndimage
+from scipy import ndimage, signal
 
 DATA_DIR = os.path.join("english")
 
@@ -151,10 +154,10 @@ def gen_clip(audio: AudioSegment, duration: int = 2000) -> AudioSegment:
     return clip.overlay(audio, offset)
 
 def audio_to_cgram(audio: AudioSegment) -> np.array:
-    # TODO: find audio input type for cochleagram (8-bit integer PCM?)
     arr = np.array(audio.get_array_of_samples())
     return cgram.human_cochleagram(arr, audio.frame_rate or SAMPLE_RATE,
-                                   N_FILTERS, LO_LIM, HI_LIM, 4, downsample=200)
+                                   N_FILTERS, LO_LIM, HI_LIM, 4, downsample=200
+                                   ).astype(np.float32)
 
 def aa_cgram(cochleagram: np.ndarray, size: int = 256) -> np.ndarray:
     f, t = cochleagram.shape
@@ -253,3 +256,56 @@ def load_cochleagrams(path: os.PathLike, word2ind: Dict[str, int],
         if limit is not None and i >= limit:
             break
     return np.array(data, dtype=np.float32), np.array(targets, dtype=np.int64)
+
+def load_cochleagrams_with_snr(path: os.PathLike, word2ind: Dict[str, int],
+                               snr: float, limit: Optional[int]) -> Tuple[np.ndarray, np.ndarray]:
+    data = []
+    targets = []
+    N = math.ceil(limit / len(word2ind))
+    word2freq = { w: 0 for w in word2ind.keys() }
+    i = 0
+    files = os.listdir(path)
+    random.shuffle(files)
+    for f in files:
+        w = f.split('_')[0]
+        matched_snr = re.search(r"_([-]?\d+\.\d+)dBSNR", f)
+        if matched_snr is None:
+            continue
+        matched_snr = float(matched_snr[1])
+        if not f.endswith(".npy") or w not in word2ind \
+            or word2freq[w] >= N or abs(matched_snr - snr) > 0.1:
+            continue
+        x = np.load(os.path.join(path, f))
+        data.append(x)
+        targets.append(word2ind[w])
+        word2freq[w] += 1
+        i += 1
+        if i >= limit:
+            break
+    return np.array(data, dtype=np.float32), np.array(targets, dtype=np.int64)
+
+def gen_lp_filter(sample_rate, size, crit_freq = 3000, scale_filter = 1.8):
+    def lessen_filter(h):
+        h = 20 * np.log(abs(h))
+        h *= .7
+        h = 10 ** (h / 20)
+        h = (h + (scale_filter - 1)) / scale_filter
+        return h
+    fs = sample_rate * 2
+    b, a = signal.butter(1, crit_freq, 'low', analog=False, fs=fs)
+    _, h = signal.freqz(b, a, size, whole=False, fs=fs)
+    lp_filter = np.repeat([lessen_filter(h)], size).transpose()
+    return lp_filter
+
+def low_filter_cgrams(cgrams: np.ndarray, lp_filter: np.ndarray) -> np.ndarray:
+    X = []
+    for c in cgrams:
+        X.append(c * lp_filter)
+    return np.array(X)
+
+def blur_cgrams(cgrams: np.ndarray, rescale: float = 2) -> np.ndarray:
+    X = []
+    for c in cgrams:
+        zoomed = ndimage.zoom(c, [rescale, 1])
+        X.append(ndimage.zoom(zoomed, [1/rescale, 1]))
+    return np.array(X)

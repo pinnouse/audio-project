@@ -9,6 +9,11 @@ import torch
 import torch.nn as nn
 from sklearn.model_selection import StratifiedKFold
 
+def warn(*args, **kwargs):
+    pass
+import warnings
+warnings.warn = warn
+
 
 def create_model(n_classes: int = 512, device: torch.device = 'cpu'
                  ) -> nn.Module:
@@ -119,7 +124,8 @@ def checkpoint_model(path: os.PathLike, model: nn.Module, epoch: int,
 def load_model_checkpoint(path: os.PathLike, model: Optional[nn.Module] = None,
                           optim: Optional[torch.optim.Optimizer] = None,
                           device: Optional[torch.device] = None):
-    checkpoint: dict = torch.load(path, map_location=device)
+    # checkpoint: dict = torch.load(path, map_location=device)
+    checkpoint: dict = torch.load(path)
     if model is not None:
         model.load_state_dict(checkpoint.pop('model_state_dict'))
     if optim is not None:
@@ -128,8 +134,8 @@ def load_model_checkpoint(path: os.PathLike, model: Optional[nn.Module] = None,
 
 def train(model: nn.Module, epochs: int, X_train: torch.Tensor,
           y_train: torch.Tensor, optim: torch.optim.Optimizer, loss_fn: any,
-          device: any, k: int = 8, bs: int = 16, save_ckpt: bool = True
-          ) -> Tuple[List[float], List[float]]:
+          device: any, k: int = 8, bs: int = 16, save_ckpt: bool = True,
+          log_training: bool = True) -> Tuple[List[float], List[float]]:
     """Train a model given parameters.
 
     Args:
@@ -143,12 +149,14 @@ def train(model: nn.Module, epochs: int, X_train: torch.Tensor,
         optim: A pytorch optimizer for stepping the gradients.
         loss_fn: The loss function to which the model is optimizing for,
             typically CrossEntropyLoss for classification.
+        device: A pytorch device to load data onto.
         k: An integer number of folds for cross-validation training.
         bs: The batch size for parallelization of training.
         test_size: A decimal value for train/valid split used for the cross
             validation splitting.
         save_ckpt: A boolean indicating whether to save checkpoints of the
             model during training.
+        log_training: A boolean for logging training information to stdout.
 
     Returns:
     -------
@@ -163,12 +171,14 @@ def train(model: nn.Module, epochs: int, X_train: torch.Tensor,
     ckpt_dir = os.path.join(os.getcwd(), 'checkpoints', start_dt)
     if save_ckpt:
         os.makedirs(ckpt_dir, exist_ok=True)
-    print('Starting training.')
-    print(f'Number of minibatches for training/test: {N_train}/{N_test}')
+    if log_training:
+        print('Starting training.')
+        print(f'Number of minibatches for training/test: {N_train}/{N_test}')
     t_losses = []
     v_losses = []
     for e in range(epochs):
-        print(f'Starting epoch {e+1} of {epochs}')
+        if log_training:
+            print(f'Starting epoch {e+1} of {epochs}')
         cv_splits = cv_sets(X_train.cpu(), y_train.cpu(), k)
 
         starttime = datetime.now()
@@ -199,10 +209,11 @@ def train(model: nn.Module, epochs: int, X_train: torch.Tensor,
         v_loss = np.mean(batch_vl)
         t_losses.append(t_loss)
         v_losses.append(v_loss)
-        secs_elapsed = (datetime.now() - starttime).total_seconds()
-        print(f'\tTraining took: {secs_elapsed:0.2f}s')
-        print(f'\t\twith train loss: {t_loss:0.6f}')
-        print(f'\t\twith valid loss: {v_loss:0.6f}')
+        if log_training:
+            secs_elapsed = (datetime.now() - starttime).total_seconds()
+            print(f'\tTraining took: {secs_elapsed:0.2f}s')
+            print(f'\t\twith train loss: {t_loss:0.6f}')
+            print(f'\t\twith valid loss: {v_loss:0.6f}')
         if save_ckpt:
             checkpoint_model(os.path.join(ckpt_dir, f'model-ckpt-e{e+1:03}.pt'),
                              model, e, optim, t_loss, v_loss)
@@ -222,9 +233,11 @@ def eval_acc(model: nn.Module, X_test: torch.Tensor, y_test: torch.Tensor,
             running_score += np.sum((ks == t).numpy(force=True))
     return running_score / N
 
-def load_dataset(path: os.PathLike) -> Tuple[torch.Tensor, torch.Tensor]:
-    X = np.load(os.path.join(path, 'inputs.npy'))
-    T = np.load(os.path.join(path, 'targets.npy'))
+def load_dataset(path: os.PathLike, inputs_file: str = 'inputs.npy',
+                 targets_file: str = 'targets.npy'
+                 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    X = np.load(os.path.join(path, inputs_file))
+    T = np.load(os.path.join(path, targets_file))
 
     N = X.shape[0]
     X = X.reshape((N, 1, 256, 256)) # reshape to 1-channel for convolutions
